@@ -1,0 +1,146 @@
+services:
+  flight-db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: flight
+      POSTGRES_USER: flight
+      POSTGRES_PASSWORD: ${FLIGHT_DB_PASSWORD:-flight}
+    volumes:
+      - flight-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U flight -d flight]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+
+  booking-db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: booking
+      POSTGRES_USER: booking
+      POSTGRES_PASSWORD: ${BOOKING_DB_PASSWORD:-booking}
+    volumes:
+      - booking-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U booking -d booking]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+
+  redis-master:
+    image: redis:7.4.2-alpine
+    command: [redis-server, --save, "", --appendonly, "no", --replica-announce-ip, redis-master, --replica-announce-port, "6379"]
+    healthcheck: &redis-health
+      test: [CMD, redis-cli, ping]
+      interval: 2s
+      timeout: 1s
+      retries: 20
+
+  redis-replica:
+    image: redis:7.4.2-alpine
+    command: [redis-server, --save, "", --appendonly, "no", --replicaof, redis-master, "6379", --replica-announce-ip, redis-replica, --replica-announce-port, "6379"]
+    depends_on:
+      redis-master:
+        condition: service_healthy
+    healthcheck: *redis-health
+
+  sentinel-1: &sentinel
+    image: redis:7.4.2-alpine
+    entrypoint: [sh, /etc/redis/sentinel.sh]
+    environment:
+      SENTINEL_HOST: sentinel-1
+    volumes:
+      - ./infra/sentinel.sh:/etc/redis/sentinel.sh:ro
+    depends_on:
+      redis-master:
+        condition: service_healthy
+      redis-replica:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, redis-cli, -p, "26379", ping]
+      interval: 2s
+      timeout: 1s
+      retries: 20
+
+  sentinel-2:
+    <<: *sentinel
+    environment:
+      SENTINEL_HOST: sentinel-2
+
+  sentinel-3:
+    <<: *sentinel
+    environment:
+      SENTINEL_HOST: sentinel-3
+
+  flight-service:
+    build:
+      context: .
+      target: flight-service
+    environment:
+      DATABASE_URL: postgres://flight:${FLIGHT_DB_PASSWORD:-flight}@flight-db:5432/flight?sslmode=disable
+      GRPC_API_KEY: ${GRPC_API_KEY:-homework-api-key}
+      REDIS_MASTER_NAME: flight-cache
+      REDIS_SENTINELS: sentinel-1:26379,sentinel-2:26379,sentinel-3:26379
+    depends_on:
+      flight-db:
+        condition: service_healthy
+      sentinel-1:
+        condition: service_healthy
+      sentinel-2:
+        condition: service_healthy
+      sentinel-3:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, /app/flight-service, health]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  booking-service:
+    build:
+      context: .
+      target: booking-service
+    ports:
+      - "127.0.0.1:${HTTP_PORT:-8080}:8080"
+    environment:
+      DATABASE_URL: postgres://booking:${BOOKING_DB_PASSWORD:-booking}@booking-db:5432/booking?sslmode=disable
+      GRPC_API_KEY: ${GRPC_API_KEY:-homework-api-key}
+      FLIGHT_GRPC_ADDR: flight-service:50051
+      GRPC_ATTEMPT_TIMEOUT: ${GRPC_ATTEMPT_TIMEOUT:-1s}
+      CB_FAILURE_THRESHOLD: ${CB_FAILURE_THRESHOLD:-5}
+      CB_OPEN_TIMEOUT: ${CB_OPEN_TIMEOUT:-10s}
+      CB_FAILURE_WINDOW: ${CB_FAILURE_WINDOW:-30s}
+    depends_on:
+      booking-db:
+        condition: service_healthy
+      flight-service:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, /app/booking-service, health]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  test:
+    image: golang:1.27.3-bookworm
+    profiles: [test]
+    working_dir: /src
+    volumes:
+      - .:/src
+      - go-cache:/go/pkg/mod
+    environment:
+      TEST_FLIGHT_DATABASE_URL: postgres://flight:${FLIGHT_DB_PASSWORD:-flight}@flight-db:5432/flight?sslmode=disable
+      TEST_BOOKING_DATABASE_URL: postgres://booking:${BOOKING_DB_PASSWORD:-booking}@booking-db:5432/booking?sslmode=disable
+      TEST_REDIS_ADDR: redis-master:6379
+      TEST_REDIS_SENTINELS: sentinel-1:26379,sentinel-2:26379,sentinel-3:26379
+    command: [go, test, -race, -count=1, ./...]
+    depends_on:
+      flight-service:
+        condition: service_healthy
+      booking-service:
+        condition: service_healthy
+
+volumes:
+  flight-data:
+  booking-data:
+  go-cache:
