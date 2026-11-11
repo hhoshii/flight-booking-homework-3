@@ -70,3 +70,50 @@ Ctrl+C завершает просмотр логов. Для остановки
 ```bash
 docker compose down
 ```
+## ER-диаграмма
+
+```mermaid
+erDiagram
+    flights ||--o{ seat_reservations : "резервации"
+    flights ||--o{ bookings : "бронирования"
+    bookings ||--|| seat_reservations : "резервация брони"
+
+    flights {
+        uuid id PK
+        text flight_number
+        text airline
+        text origin
+        text destination
+        timestamptz departure_time
+        timestamptz arrival_time
+        integer total_seats
+        integer available_seats
+        bigint price
+        text status
+    }
+
+    seat_reservations {
+        uuid id PK
+        uuid flight_id FK
+        uuid booking_id UK
+        integer seat_count
+        text status
+        timestamptz created_at
+    }
+
+    bookings {
+        uuid id PK
+        uuid user_id
+        uuid flight_id
+        text passenger_name
+        text passenger_email
+        integer seat_count
+        bigint total_price
+        text status
+        timestamptz created_at
+    }
+```
+
+`flights` и `seat_reservations` хранятся в Flight DB, `bookings` — в Booking DB. Связи между базами логические, по UUID. Одному бронированию соответствует одна резервация.
+
+Атрибуты каждой таблицы зависят от ключа своей сущности. `total_price` хранит стоимость на момент бронирования. SQL-ограничения проверяют цену и количество мест, а пара «номер рейса и дата вылета по UTC» уникальна.
